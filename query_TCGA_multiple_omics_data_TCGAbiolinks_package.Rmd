@@ -1,0 +1,182 @@
+---
+title: "Retrieve_multiple_omics_TCGA_data_using_TCGAbiolinks_package"
+author: "Menna Arafat"
+date: "2024-7-02"
+output: html_document
+---
+
+```{r }
+
+dir= c("proteomics", "miRNA", "CNV","DNA_Methylation", "SNV", "clinical", "lnRNA" )
+for(i in seq_along(dir)){
+  dir.create(dir[i])
+}
+```
+
+```{r }
+#BiocManager::install("ConsensusClusterPlus")
+library(TCGAbiolinks)
+library(tidyverse)
+library(maftools)
+library(SummarizedExperiment)
+library(tibble)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+```
+
+## get a list of projects
+```{r }
+gdcprojects <- getGDCprojects()
+getProjectSummary('TCGA-BRCA')
+getProjectSummary("CMI-MBC")
+```
+
+## build a query to retrieve gene expression data 
+```{r }
+query_TCGA <- GDCquery(project = 'TCGA-BRCA',
+                       data.category = 'Transcriptome Profiling',
+                       experimental.strategy = 'RNA-Seq',
+                       access = 'open'
+                         )
+                      
+
+getResults(query_TCGA)
+
+# download data - GDCdownload
+GDCdownload(query_TCGA, files.per.chunk = 20, method = "api",  directory = "mrna/GDCdata")
+
+# prepare data
+tcga_brca<- GDCprepare(query_TCGA, summarizedExperiment = TRUE,  directory = "mrna/GDCdata")
+#save 
+saveRDS(tcga_brca, file = "mrna/TCGA_mRNA.RDS")
+```
+
+# Query multiple omics data
+##Function to retrieve multiple omics
+```{r }
+get_OmicsData <- function(project  = NULL,
+                          Outdir   = NULL){
+  if(Outdir == "proteomics"){
+    query_Data <- GDCquery(project = project,
+                           data.category="Proteome Profiling",
+                           data.type="Protein Expression Quantification",
+                           experimental.strategy='Reverse Phase Protein Array'
+                             
+    )     
+  }else if(Outdir == "miRNA"){
+    query_Data <- GDCquery(project = project,
+                           data.category = "Transcriptome Profiling",
+                           data.type = "miRNA Expression Quantification",
+                           workflow.type = "BCGSC miRNA Profiling"
+                           )     
+  }else if(Outdir == "CNV"){
+    query_Data <- GDCquery(project = project,
+                           data.category = "Copy Number Variation",
+                           data.type = "Copy Number Segment" #"Gene Level Copy Number"
+                           )     
+  }else if(Outdir == "DNA_Methylation"){
+    query_Data <- GDCquery(project = project,
+                           data.category = "DNA Methylation",
+                           platform = "Illumina Human Methylation 450",
+                           data.type = "Methylation Beta Value"
+                             )     
+  }else if( Outdir== "SNV"){
+    query_Data <- GDCquery(project = project,
+                   data.category = "Simple Nucleotide Variation",
+                   experimental.strategy = "WXS",
+                   data.type = "Masked Somatic Mutation",
+                   workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking",
+                   data.format = "MAF"
+                     )
+  }else if(Outdir== "clinical"){
+    query_Data <- GDCquery(project = project,
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement"
+                  )
+  }else if(Outdir== "lnRNA"){
+    query_Data <- GDCquery(
+                  project = project,
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  platform= "Illumina HiSeq"
+    )
+  }
+  
+  Outdir= Outdir
+  GDCdownload(query = query_Data,
+              method = "api",
+              files.per.chunk = 10,
+              directory = Outdir)
+  
+  expdat <- GDCprepare(query = query_Data,
+                       directory = Outdir)
+  
+  # Assign the result to the global environment with the name of Outdir
+  return( assign(Outdir, expdat, envir = .GlobalEnv) )
+}
+```
+
+## Run the function
+```{r }
+outdir= c("proteomics", "miRNA", "CNV","DNA_Methylation", "SNV", "clinical", "lnRNA")
+
+for(i in seq_along(outdir)){
+                        get_OmicsData(project =  'TCGA-BRCA',
+                        Outdir = outdir[i] )}
+```
+
+# query clinical data
+```{r }
+query_clinical <- GDCquery(project ='TCGA-BRCA',
+                       data.category = "Clinical",
+                       data.type = "Clinical Supplement",
+                       data.format=  "BCR Biotab")
+GDCdownload(query_clinical , files.per.chunk = 20, method = "api",  directory = "clinical")
+clinical<- GDCprepare(query_clinical, summarizedExperiment = FALSE,  directory = "clinical")
+
+metadata_clinical= clinical[["clinical_patient_brca"]] %>% as.data.frame()
+write.csv(metadata_clinical, "metadata_tcga_brca.csv")
+```
+#--------------------------------------------------
+# query data  using barcodes
+```{r }
+barcodes= metadata_clinical$bcr_patient_barcode
+
+
+query = GDCquery(project = 'TCGA-BRCA',
+                       data.category = 'Transcriptome Profiling',
+                       experimental.strategy = 'RNA-Seq',
+                       access = 'open',
+                       barcode = barcodes)
+#in case of the data is not get already downloaded
+GDCdownload(query, files.per.chunk = 20, method = "api",  directory = "mrna")
+
+mRNA= GDCprepare(query, summarizedExperiment = TRUE,  directory = "mrna")
+```
+
+## get expression data, metadata
+```{r }
+names(assays(mRNA_TNBC))
+exp <- assay(mRNA_TNBC, "unstranded")
+View(exp[1:100,1:100])
+data= exp[!duplicated(row.names(exp)),]
+#write.csv(data, "mRNA_raw_count_TNBC.csv", row.names = T)
+
+
+#check that we retrieved the correct samples
+patient_id= colnames(data) %>% gsub("^(\\w+-\\w+-\\w+).*", "\\1", .)
+patient_id %in% barcodes
+
+metadata_obj= colData(mRNA_TNBC)@listData[c("paper_BRCA_Subtype_PAM50","ajcc_pathologic_stage", "ajcc_metastasis_pathologic_pm",
+                                            "tissue_type", "patient", "barcode")]
+
+meta_df= ldply(metadata_obj, rbind) %>% t() %>% as.data.frame() 
+names(meta_df)= meta_df[1,] 
+meta_df= meta_df[-1,]
+metadata= inner_join(metadata_clinical, meta_df, by= c("bcr_patient_barcode"= "patient") )
+write.csv(metadata, "metadata_TNBC.csv", row.names = F)
+```
+
+
+
